@@ -20,7 +20,7 @@ const client = new Client({
   partials: [Partials.Channel]
 });
 
-// CONFIG
+// ---------------- CONFIG ----------------
 const GUILD_ID = '1449379857975742539';
 const WATCHED_USERS = [
   '915972726634729503',
@@ -29,11 +29,11 @@ const WATCHED_USERS = [
 ];
 const OWNER_ID = '1242864721967845387';
 const CHANNEL_ID = '1472408286853599415';
-const VOICE_CHANNEL_ID = 'YOUR_VOICE_CHANNEL_ID'; // replace with VC id
+const VOICE_CHANNEL_ID = '1469000890395529403'; // your VC
 
 const userStatusMap = new Map();
 
-// ------------------ PRESENCE TRACKER ------------------
+// ---------------- PRESENCE TRACKER & VC ----------------
 client.once('ready', async () => {
   console.log(`Logged in as ${client.user.tag}`);
 
@@ -41,7 +41,7 @@ client.once('ready', async () => {
     const guild = await client.guilds.fetch(GUILD_ID);
     await guild.members.fetch();
 
-    // Startup status check
+    // Check online status on startup
     guild.members.cache.forEach(member => {
       if (WATCHED_USERS.includes(member.id)) {
         const status = member.presence?.status || 'offline';
@@ -71,7 +71,6 @@ client.once('ready', async () => {
     } else {
       console.warn('Voice channel not found or invalid!');
     }
-
   } catch (err) {
     console.error('Startup error:', err);
   }
@@ -99,7 +98,7 @@ client.on('presenceUpdate', async (oldPresence, newPresence) => {
   }
 });
 
-// ------------------ MODERATION COMMANDS ------------------
+// ---------------- MODERATION COMMANDS ----------------
 const commands = [
   new SlashCommandBuilder()
     .setName('kick')
@@ -127,8 +126,7 @@ const commands = [
     .setDescription('Put a user in timeout')
     .addUserOption(option => option.setName('target').setDescription('The user to timeout').setRequired(true))
     .addIntegerOption(option => option.setName('minutes').setDescription('Duration in minutes').setRequired(true))
-]
-.map(cmd => cmd.toJSON());
+].map(cmd => cmd.toJSON());
 
 // Register commands
 const rest = new REST({ version: '10' }).setToken(process.env.BOT_TOKEN);
@@ -147,11 +145,9 @@ const rest = new REST({ version: '10' }).setToken(process.env.BOT_TOKEN);
 // Command handler
 client.on('interactionCreate', async interaction => {
   if (!interaction.isChatInputCommand()) return;
-
   const { commandName } = interaction;
   const target = interaction.options.getUser('target');
   if (!interaction.guild || !target) return;
-
   const member = await interaction.guild.members.fetch(target.id).catch(() => null);
   if (!member) return interaction.reply({ content: 'Member not found!', ephemeral: true });
 
@@ -165,31 +161,26 @@ client.on('interactionCreate', async interaction => {
         await member.kick();
         interaction.reply(`${target.tag} has been kicked.`);
         break;
-
       case 'ban':
         await member.ban({ reason: `Banned by ${interaction.user.tag}` });
         interaction.reply(`${target.tag} has been banned.`);
         break;
-
       case 'mute': {
         const minutes = interaction.options.getInteger('minutes') || 10;
         await member.timeout(minutes * 60 * 1000, `Muted by ${interaction.user.tag}`);
         interaction.reply(`${target.tag} has been muted for ${minutes} minutes.`);
         break;
       }
-
       case 'unmute':
         await member.timeout(null);
         interaction.reply(`${target.tag} has been unmuted.`);
         break;
-
       case 'timeout': {
         const minutes = interaction.options.getInteger('minutes');
         await member.timeout(minutes * 60 * 1000, `Timed out by ${interaction.user.tag}`);
         interaction.reply(`${target.tag} has been timed out for ${minutes} minutes.`);
         break;
       }
-
       default:
         interaction.reply({ content: 'Unknown command.', ephemeral: true });
     }
