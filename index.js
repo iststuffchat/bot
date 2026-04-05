@@ -1,26 +1,23 @@
-const { 
-  Client, 
-  GatewayIntentBits, 
-  Partials, 
-  PermissionsBitField, 
-  REST, 
-  Routes, 
-  SlashCommandBuilder 
+const {
+  Client,
+  GatewayIntentBits,
+  PermissionsBitField,
+  EmbedBuilder,
+  ChannelType
 } = require('discord.js');
-const { joinVoiceChannel, entersState, VoiceConnectionStatus } = require('@discordjs/voice');
 
 const client = new Client({
   intents: [
     GatewayIntentBits.Guilds,
     GatewayIntentBits.GuildMembers,
     GatewayIntentBits.GuildPresences,
-    GatewayIntentBits.GuildVoiceStates,
+    GatewayIntentBits.GuildMessages,
     GatewayIntentBits.MessageContent
-  ],
-  partials: [Partials.Channel]
+  ]
 });
 
-// ---------------- CONFIG ----------------
+// ===== CONFIG =====
+const PREFIX = '!';
 const GUILD_ID = '1449379857975742539';
 const WATCHED_USERS = [
   '915972726634729503',
@@ -29,11 +26,19 @@ const WATCHED_USERS = [
 ];
 const OWNER_ID = '1242864721967845387';
 const CHANNEL_ID = '1472408286853599415';
-const VOICE_CHANNEL_ID = '1469000890395529403'; // your VC
+const LOG_CHANNEL_ID = '1472408286853599415';
 
 const userStatusMap = new Map();
+const spamMap = new Map();
 
-// ---------------- PRESENCE TRACKER & VC ----------------
+function logAction(channel, title, description) {
+  const embed = new EmbedBuilder()
+    .setTitle(`🛡️ ${title}`)
+    .setDescription(description)
+    .setTimestamp();
+  channel.send({ embeds: [embed] }).catch(() => {});
+}
+
 client.once('ready', async () => {
   console.log(`Logged in as ${client.user.tag}`);
 
@@ -41,47 +46,24 @@ client.once('ready', async () => {
     const guild = await client.guilds.fetch(GUILD_ID);
     await guild.members.fetch();
 
-    // Check online status on startup
     guild.members.cache.forEach(member => {
       if (WATCHED_USERS.includes(member.id)) {
         const status = member.presence?.status || 'offline';
         userStatusMap.set(member.id, status);
-
-        if (status === 'online') {
-          const channel = guild.channels.cache.get(CHANNEL_ID);
-          if (channel?.isTextBased()) {
-            channel.send(`<@${OWNER_ID}> User <@${member.id}> is already online!`);
-          }
-        }
       }
     });
 
-    // Join VC
-    const voiceChannel = guild.channels.cache.get(VOICE_CHANNEL_ID);
-    if (voiceChannel?.isVoiceBased()) {
-      const connection = joinVoiceChannel({
-        channelId: VOICE_CHANNEL_ID,
-        guildId: GUILD_ID,
-        adapterCreator: guild.voiceAdapterCreator,
-        selfDeaf: false,
-        selfMute: true
-      });
-      await entersState(connection, VoiceConnectionStatus.Ready, 20_000);
-      console.log(`Joined voice channel: ${voiceChannel.name}`);
-    } else {
-      console.warn('Voice channel not found or invalid!');
-    }
+    console.log('Advanced moderation bot is online.');
   } catch (err) {
     console.error('Startup error:', err);
   }
 });
 
-client.on('presenceUpdate', async (oldPresence, newPresence) => {
+// ===== WATCH ONLINE USERS =====
+client.on('presenceUpdate', async (_, newPresence) => {
   if (!newPresence) return;
-  const userId = newPresence.userId;
-  const guildId = newPresence.guild.id;
 
-  if (guildId !== GUILD_ID) return;
+  const userId = newPresence.userId;
   if (!WATCHED_USERS.includes(userId)) return;
 
   const newStatus = newPresence.status;
@@ -89,104 +71,114 @@ client.on('presenceUpdate', async (oldPresence, newPresence) => {
 
   if (oldStatus !== newStatus) {
     userStatusMap.set(userId, newStatus);
+
     if (newStatus === 'online') {
-      const channel = await client.channels.fetch(CHANNEL_ID);
-      if (channel.isTextBased()) {
-        channel.send(`<@${OWNER_ID}> User <@${userId}> is now online!`);
+      const channel = await client.channels.fetch(CHANNEL_ID).catch(() => null);
+      if (channel?.isTextBased()) {
+        channel.send(`🔔 <@${OWNER_ID}> User <@${userId}> is now online!`);
       }
     }
   }
 });
 
-// ---------------- MODERATION COMMANDS ----------------
-const commands = [
-  new SlashCommandBuilder()
-    .setName('kick')
-    .setDescription('Kick a user from the server')
-    .addUserOption(option => option.setName('target').setDescription('The user to kick').setRequired(true)),
+// ===== AUTO MODERATION =====
+client.on('messageCreate', async message => {
+  if (!message.guild || message.author.bot) return;
 
-  new SlashCommandBuilder()
-    .setName('ban')
-    .setDescription('Ban a user from the server')
-    .addUserOption(option => option.setName('target').setDescription('The user to ban').setRequired(true)),
-
-  new SlashCommandBuilder()
-    .setName('mute')
-    .setDescription('Mute a user')
-    .addUserOption(option => option.setName('target').setDescription('The user to mute').setRequired(true))
-    .addIntegerOption(option => option.setName('minutes').setDescription('Duration in minutes').setRequired(false)),
-
-  new SlashCommandBuilder()
-    .setName('unmute')
-    .setDescription('Unmute a user')
-    .addUserOption(option => option.setName('target').setDescription('The user to unmute').setRequired(true)),
-
-  new SlashCommandBuilder()
-    .setName('timeout')
-    .setDescription('Put a user in timeout')
-    .addUserOption(option => option.setName('target').setDescription('The user to timeout').setRequired(true))
-    .addIntegerOption(option => option.setName('minutes').setDescription('Duration in minutes').setRequired(true))
-].map(cmd => cmd.toJSON());
-
-// Register commands
-const rest = new REST({ version: '10' }).setToken(process.env.BOT_TOKEN);
-(async () => {
-  try {
-    await rest.put(
-      Routes.applicationGuildCommands(process.env.CLIENT_ID, GUILD_ID),
-      { body: commands },
-    );
-    console.log('Moderation commands registered!');
-  } catch (err) {
-    console.error(err);
-  }
-})();
-
-// Command handler
-client.on('interactionCreate', async interaction => {
-  if (!interaction.isChatInputCommand()) return;
-  const { commandName } = interaction;
-  const target = interaction.options.getUser('target');
-  if (!interaction.guild || !target) return;
-  const member = await interaction.guild.members.fetch(target.id).catch(() => null);
-  if (!member) return interaction.reply({ content: 'Member not found!', ephemeral: true });
-
-  if (!interaction.member.permissions.has(PermissionsBitField.Flags.KickMembers)) {
-    return interaction.reply({ content: 'You do not have permission to use this command!', ephemeral: true });
+  // Anti-link
+  if (/https?:\/\//i.test(message.content) && !message.member.permissions.has(PermissionsBitField.Flags.ManageMessages)) {
+    await message.delete().catch(() => {});
+    return message.channel.send(`⚠️ ${message.author}, links are not allowed here.`);
   }
 
-  try {
-    switch (commandName) {
-      case 'kick':
-        await member.kick();
-        interaction.reply(`${target.tag} has been kicked.`);
-        break;
-      case 'ban':
-        await member.ban({ reason: `Banned by ${interaction.user.tag}` });
-        interaction.reply(`${target.tag} has been banned.`);
-        break;
-      case 'mute': {
-        const minutes = interaction.options.getInteger('minutes') || 10;
-        await member.timeout(minutes * 60 * 1000, `Muted by ${interaction.user.tag}`);
-        interaction.reply(`${target.tag} has been muted for ${minutes} minutes.`);
-        break;
-      }
-      case 'unmute':
-        await member.timeout(null);
-        interaction.reply(`${target.tag} has been unmuted.`);
-        break;
-      case 'timeout': {
-        const minutes = interaction.options.getInteger('minutes');
-        await member.timeout(minutes * 60 * 1000, `Timed out by ${interaction.user.tag}`);
-        interaction.reply(`${target.tag} has been timed out for ${minutes} minutes.`);
-        break;
-      }
-      default:
-        interaction.reply({ content: 'Unknown command.', ephemeral: true });
-    }
-  } catch (err) {
-    console.error(err);
-    interaction.reply({ content: 'Failed to execute command.', ephemeral: true });
+  // Anti-spam
+  const now = Date.now();
+  const userData = spamMap.get(message.author.id) || [];
+  const filtered = userData.filter(t => now - t < 5000);
+  filtered.push(now);
+  spamMap.set(message.author.id, filtered);
+
+  if (filtered.length >= 6) {
+    await message.member.timeout(60 * 1000, 'Spam detected').catch(() => {});
+    return message.channel.send(`⏱️ ${message.author} was timed out for spamming.`);
+  }
+
+  if (!message.content.startsWith(PREFIX)) return;
+
+  const args = message.content.slice(PREFIX.length).trim().split(/\s+/);
+  const command = args.shift()?.toLowerCase();
+
+  // ===== MOD COMMANDS =====
+  if (command === 'purge') {
+    if (!message.member.permissions.has(PermissionsBitField.Flags.ManageMessages)) return;
+    const amount = parseInt(args[0]);
+    if (!amount || amount < 1 || amount > 100) return message.reply('Use 1-100');
+    await message.channel.bulkDelete(amount, true);
+    return message.channel.send(`🧹 Deleted ${amount} messages.`);
+  }
+
+  if (command === 'kick') {
+    if (!message.member.permissions.has(PermissionsBitField.Flags.KickMembers)) return;
+    const member = message.mentions.members.first();
+    if (!member) return message.reply('Mention a user');
+    await member.kick('Kicked by moderator');
+    return message.channel.send(`👢 Kicked ${member.user.tag}`);
+  }
+
+  if (command === 'ban') {
+    if (!message.member.permissions.has(PermissionsBitField.Flags.BanMembers)) return;
+    const member = message.mentions.members.first();
+    if (!member) return message.reply('Mention a user');
+    await member.ban({ reason: 'Banned by moderator' });
+    return message.channel.send(`🔨 Banned ${member.user.tag}`);
+  }
+
+  if (command === 'timeout') {
+    if (!message.member.permissions.has(PermissionsBitField.Flags.ModerateMembers)) return;
+    const member = message.mentions.members.first();
+    const mins = parseInt(args[1]);
+    if (!member || !mins) return message.reply('Usage: !timeout @user 10');
+    await member.timeout(mins * 60 * 1000, 'Timed out by moderator');
+    return message.channel.send(`⏱️ Timed out ${member.user.tag} for ${mins}m`);
+  }
+
+  if (command === 'lock') {
+    if (!message.member.permissions.has(PermissionsBitField.Flags.ManageChannels)) return;
+    await message.channel.permissionOverwrites.edit(message.guild.roles.everyone, {
+      SendMessages: false
+    });
+    return message.channel.send('🔒 Channel locked');
+  }
+
+  if (command === 'unlock') {
+    if (!message.member.permissions.has(PermissionsBitField.Flags.ManageChannels)) return;
+    await message.channel.permissionOverwrites.edit(message.guild.roles.everyone, {
+      SendMessages: true
+    });
+    return message.channel.send('🔓 Channel unlocked');
+  }
+
+  // ===== COOL UTILITY COMMANDS =====
+  if (command === 'ping') {
+    return message.reply(`🏓 ${client.ws.ping}ms`);
+  }
+
+  if (command === 'userinfo') {
+    const member = message.mentions.members.first() || message.member;
+    const embed = new EmbedBuilder()
+      .setTitle('👤 User Info')
+      .setDescription(`User: ${member.user.tag}\nID: ${member.id}\nJoined: ${member.joinedAt}`)
+      .setThumbnail(member.user.displayAvatarURL());
+    return message.channel.send({ embeds: [embed] });
+  }
+
+  if (command === 'serverinfo') {
+    const guild = message.guild;
+    const embed = new EmbedBuilder()
+      .setTitle('🌐 Server Info')
+      .setDescription(`Name: ${guild.name}\nMembers: ${guild.memberCount}`)
+      .setThumbnail(guild.iconURL());
+    return message.channel.send({ embeds: [embed] });
   }
 });
 
