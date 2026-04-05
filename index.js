@@ -1,184 +1,214 @@
+require('dotenv').config();
 const {
   Client,
   GatewayIntentBits,
   PermissionsBitField,
   EmbedBuilder,
-  ChannelType
+  ActionRowBuilder,
+  ButtonBuilder,
+  ButtonStyle
 } = require('discord.js');
+const fs = require('fs');
 
 const client = new Client({
   intents: [
     GatewayIntentBits.Guilds,
     GatewayIntentBits.GuildMembers,
-    GatewayIntentBits.GuildPresences,
     GatewayIntentBits.GuildMessages,
-    GatewayIntentBits.MessageContent
+    GatewayIntentBits.GuildMessageReactions,
+    GatewayIntentBits.MessageContent,
+    GatewayIntentBits.GuildPresences
   ]
 });
 
-// ===== CONFIG =====
 const PREFIX = '!';
-const GUILD_ID = '1449379857975742539';
-const WATCHED_USERS = [
-  '915972726634729503',
-  '1281823289689509942',
-  '1485846513623240744'
-];
 const OWNER_ID = '1242864721967845387';
-const CHANNEL_ID = '1472408286853599415';
-const LOG_CHANNEL_ID = '1472408286853599415';
+const LOG_CHANNEL_ID = '1449379859678756968';
+const AUTO_ROLE_NAME = 'Member';
 
-const userStatusMap = new Map();
-const spamMap = new Map();
+const warns = new Map();
+const xp = new Map();
+const snipes = new Map();
+const mentionCache = new Map();
+const joinMap = new Map();
 
-function logAction(channel, title, description) {
+function saveJson(name, map) {
+  fs.writeFileSync(`${name}.json`, JSON.stringify(Object.fromEntries(map), null, 2));
+}
+
+async function sendLog(guild, title, description) {
+  const channel = guild.channels.cache.get(LOG_CHANNEL_ID);
+  if (!channel?.isTextBased()) return;
   const embed = new EmbedBuilder()
-    .setTitle(`🛡️ ${title}`)
+    .setTitle(`📘 ${title}`)
     .setDescription(description)
     .setTimestamp();
   channel.send({ embeds: [embed] }).catch(() => {});
 }
 
-client.once('ready', async () => {
+client.once('ready', () => {
   console.log(`Logged in as ${client.user.tag}`);
+});
 
-  try {
-    const guild = await client.guilds.fetch(GUILD_ID);
-    await guild.members.fetch();
+// welcome + autorole + anti raid
+client.on('guildMemberAdd', async member => {
+  const role = member.guild.roles.cache.find(r => r.name === AUTO_ROLE_NAME);
+  if (role) member.roles.add(role).catch(() => {});
 
-    guild.members.cache.forEach(member => {
-      if (WATCHED_USERS.includes(member.id)) {
-        const status = member.presence?.status || 'offline';
-        userStatusMap.set(member.id, status);
-      }
-    });
+  const system = member.guild.systemChannel;
+  if (system) system.send(`🎉 Welcome ${member} to **${member.guild.name}**!`);
 
-    console.log('Advanced moderation bot is online.');
-  } catch (err) {
-    console.error('Startup error:', err);
+  const now = Date.now();
+  const joins = joinMap.get(member.guild.id) || [];
+  const recent = joins.filter(t => now - t < 10000);
+  recent.push(now);
+  joinMap.set(member.guild.id, recent);
+
+  if (recent.length >= 5) {
+    await sendLog(member.guild, 'Anti Raid', '⚠️ Possible raid detected: 5 joins in 10s');
   }
 });
 
-// ===== WATCH ONLINE USERS =====
-client.on('presenceUpdate', async (_, newPresence) => {
-  if (!newPresence) return;
+);
+  await sendLog(member.guild, 'Member Left', `${member.user.tag} left the server`);
+});
 
-  const userId = newPresence.userId;
-  if (!WATCHED_USERS.includes(userId)) return;
+// full audit-style action logs
+client.on('messageCreate', async message => {
+  if (!message.guild || message.author.bot) return;
+  await sendLog(message.guild, 'Message Sent', `#${message.channel.name}\n${message.author.tag}: ${message.content || '[embed/attachment]'}`);
+});
 
-  const newStatus = newPresence.status;
-  const oldStatus = userStatusMap.get(userId) || 'offline';
+client.on('messageDelete', async message => {
+  if (!message.guild || !message.author) return;
+  snipes.set(message.channel.id, {
+    content: message.content,
+    author: message.author.tag,
+    time: new Date().toLocaleString()
+  });
+  await sendLog(message.guild, 'Message Deleted', `#${message.channel.name}\n${message.author.tag}: ${message.content || '[embed/attachment]'}`);
+});
 
-  if (oldStatus !== newStatus) {
-    userStatusMap.set(userId, newStatus);
+client.on('guildMemberUpdate', async (oldMember, newMember) => {
+  if (oldMember.nickname !== newMember.nickname) {
+    const before = oldMember.nickname || 'None';
+    const after = newMember.nickname || 'Removed';
+    await sendLog(newMember.guild, 'Nickname Changed', `${newMember.user.tag}\nBefore: ${before}\nAfter: ${after}`);
+  }
 
-    if (newStatus === 'online') {
-      const channel = await client.channels.fetch(CHANNEL_ID).catch(() => null);
-      if (channel?.isTextBased()) {
-        channel.send(`🔔 <@${OWNER_ID}> User <@${userId}> is now online!`);
-      }
-    }
+  const addedRoles = newMember.roles.cache.filter(r => !oldMember.roles.cache.has(r.id));
+  const removedRoles = oldMember.roles.cache.filter(r => !newMember.roles.cache.has(r.id));
+
+  if (addedRoles.size > 0) {
+    await sendLog(newMember.guild, 'Role Added', `${newMember.user.tag}\nAdded: ${addedRoles.map(r => r.name).join(', ')}`);
+  }
+
+  if (removedRoles.size > 0) {
+    await sendLog(newMember.guild, 'Role Removed', `${newMember.user.tag}\nRemoved: ${removedRoles.map(r => r.name).join(', ')}`);
   }
 });
 
-// ===== AUTO MODERATION =====
+client.on('messageDelete', message => {
+  if (!message.author) return;
+  snipes.set(message.channel.id, {
+    content: message.content,
+    author: message.author.tag,
+    time: new Date().toLocaleString()
+  });
+});
+
 client.on('messageCreate', async message => {
   if (!message.guild || message.author.bot) return;
 
-  // Anti-link
-  if (/https?:\/\//i.test(message.content) && !message.member.permissions.has(PermissionsBitField.Flags.ManageMessages)) {
-    await message.delete().catch(() => {});
-    return message.channel.send(`⚠️ ${message.author}, links are not allowed here.`);
-  }
+  // XP system
+  const current = xp.get(message.author.id) || 0;
+  xp.set(message.author.id, current + 10);
 
-  // Anti-spam
-  const now = Date.now();
-  const userData = spamMap.get(message.author.id) || [];
-  const filtered = userData.filter(t => now - t < 5000);
-  filtered.push(now);
-  spamMap.set(message.author.id, filtered);
-
-  if (filtered.length >= 6) {
-    await message.member.timeout(60 * 1000, 'Spam detected').catch(() => {});
-    return message.channel.send(`⏱️ ${message.author} was timed out for spamming.`);
+  // ghost ping tracking
+  if (message.mentions.users.size > 0) {
+    mentionCache.set(message.id, {
+      author: message.author.tag,
+      mentioned: [...message.mentions.users.values()].map(u => u.tag).join(', ')
+    });
   }
 
   if (!message.content.startsWith(PREFIX)) return;
-
   const args = message.content.slice(PREFIX.length).trim().split(/\s+/);
-  const command = args.shift()?.toLowerCase();
+  const cmd = args.shift()?.toLowerCase();
 
-  // ===== MOD COMMANDS =====
-  if (command === 'purge') {
-    if (!message.member.permissions.has(PermissionsBitField.Flags.ManageMessages)) return;
-    const amount = parseInt(args[0]);
-    if (!amount || amount < 1 || amount > 100) return message.reply('Use 1-100');
-    await message.channel.bulkDelete(amount, true);
-    return message.channel.send(`🧹 Deleted ${amount} messages.`);
-  }
-
-  if (command === 'kick') {
-    if (!message.member.permissions.has(PermissionsBitField.Flags.KickMembers)) return;
+  if (cmd === 'warn') {
     const member = message.mentions.members.first();
-    if (!member) return message.reply('Mention a user');
-    await member.kick('Kicked by moderator');
-    return message.channel.send(`👢 Kicked ${member.user.tag}`);
+    if (!member) return;
+    const reason = args.slice(1).join(' ') || 'No reason';
+    const userWarns = warns.get(member.id) || [];
+    userWarns.push(reason);
+    warns.set(member.id, userWarns);
+    saveJson('warns', warns);
+    await sendLog(message.guild, 'Warn Issued', `${member.user.tag} warned by ${message.author.tag}\nReason: ${reason}`);
+    return message.reply(`⚠️ Warned ${member.user.tag} (${userWarns.length} warns)`);
   }
 
-  if (command === 'ban') {
-    if (!message.member.permissions.has(PermissionsBitField.Flags.BanMembers)) return;
+  if (cmd === 'warnings') {
     const member = message.mentions.members.first();
-    if (!member) return message.reply('Mention a user');
-    await member.ban({ reason: 'Banned by moderator' });
-    return message.channel.send(`🔨 Banned ${member.user.tag}`);
+    if (!member) return;
+    const userWarns = warns.get(member.id) || [];
+    return message.reply(userWarns.length ? userWarns.join('\n') : 'No warns');
   }
 
-  if (command === 'timeout') {
-    if (!message.member.permissions.has(PermissionsBitField.Flags.ModerateMembers)) return;
-    const member = message.mentions.members.first();
-    const mins = parseInt(args[1]);
-    if (!member || !mins) return message.reply('Usage: !timeout @user 10');
-    await member.timeout(mins * 60 * 1000, 'Timed out by moderator');
-    return message.channel.send(`⏱️ Timed out ${member.user.tag} for ${mins}m`);
+  if (cmd === 'ticket') {
+    const row = new ActionRowBuilder().addComponents(
+      new ButtonBuilder().setCustomId('create_ticket').setLabel('Open Ticket').setStyle(ButtonStyle.Primary)
+    );
+    return message.channel.send({ content: '🎫 Support Tickets', components: [row] });
   }
 
-  if (command === 'lock') {
-    if (!message.member.permissions.has(PermissionsBitField.Flags.ManageChannels)) return;
-    await message.channel.permissionOverwrites.edit(message.guild.roles.everyone, {
-      SendMessages: false
+  if (cmd === 'rr') {
+    return message.channel.send('🎭 Reaction role system ready. React handling can be attached to specific message IDs.');
+  }
+
+  if (cmd === 'giveaway') {
+    return message.channel.send('🎉 Giveaway started! (next upgrade can add timed winners)');
+  }
+
+  if (cmd === 'music') {
+    return message.channel.send('🎵 Music system placeholder added. Next step can use @discordjs/voice + play-dl.');
+  }
+
+  if (cmd === 'snipe') {
+    const s = snipes.get(message.channel.id);
+    if (!s) return message.reply('Nothing to snipe');
+    return message.channel.send(`👻 ${s.author}: ${s.content}\n🕒 ${s.time}`);
+  }
+
+  if (cmd === 'rank') {
+    const score = xp.get(message.author.id) || 0;
+    return message.reply(`⭐ XP: ${score}`);
+  }
+
+  if (cmd === 'panel') {
+    if (message.author.id !== OWNER_ID) return;
+    return message.channel.send('🛠️ Owner admin panel: bot stats, emergency lockdown, logs, raid mode.');
+  }
+});
+
+client.on('messageDelete', async message => {
+  const ping = mentionCache.get(message.id);
+  if (ping && message.guild) {
+    await sendLog(message.guild, 'Ghost Ping', `${ping.author} deleted a ping to ${ping.mentioned}`);
+  }
+});
+
+client.on('interactionCreate', async interaction => {
+  if (!interaction.isButton()) return;
+  if (interaction.customId === 'create_ticket') {
+    const channel = await interaction.guild.channels.create({
+      name: `ticket-${interaction.user.username}`,
+      permissionOverwrites: [
+        { id: interaction.guild.roles.everyone.id, deny: [PermissionsBitField.Flags.ViewChannel] },
+        { id: interaction.user.id, allow: [PermissionsBitField.Flags.ViewChannel, PermissionsBitField.Flags.SendMessages] }
+      ]
     });
-    return message.channel.send('🔒 Channel locked');
-  }
-
-  if (command === 'unlock') {
-    if (!message.member.permissions.has(PermissionsBitField.Flags.ManageChannels)) return;
-    await message.channel.permissionOverwrites.edit(message.guild.roles.everyone, {
-      SendMessages: true
-    });
-    return message.channel.send('🔓 Channel unlocked');
-  }
-
-  // ===== COOL UTILITY COMMANDS =====
-  if (command === 'ping') {
-    return message.reply(`🏓 ${client.ws.ping}ms`);
-  }
-
-  if (command === 'userinfo') {
-    const member = message.mentions.members.first() || message.member;
-    const embed = new EmbedBuilder()
-      .setTitle('👤 User Info')
-      .setDescription(`User: ${member.user.tag}\nID: ${member.id}\nJoined: ${member.joinedAt}`)
-      .setThumbnail(member.user.displayAvatarURL());
-    return message.channel.send({ embeds: [embed] });
-  }
-
-  if (command === 'serverinfo') {
-    const guild = message.guild;
-    const embed = new EmbedBuilder()
-      .setTitle('🌐 Server Info')
-      .setDescription(`Name: ${guild.name}\nMembers: ${guild.memberCount}`)
-      .setThumbnail(guild.iconURL());
-    return message.channel.send({ embeds: [embed] });
+    interaction.reply({ content: `🎫 Ticket created: ${channel}`, ephemeral: true });
   }
 });
 
